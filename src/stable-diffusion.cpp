@@ -229,6 +229,7 @@ public:
     float active_flow_shift          = INFINITY;
 
     std::shared_ptr<Conditioner> cond_stage_model;
+    SDCondition external_kv_conditions[2];
     std::shared_ptr<FrozenCLIPVisionEmbedder> clip_vision;  // for svd or wan2.1 i2v
     std::shared_ptr<DiffusionModelRunner> diffusion_model;
     std::shared_ptr<DiffusionModelRunner> high_noise_diffusion_model;
@@ -1278,7 +1279,8 @@ public:
                 diffusion_model  = std::make_shared<SenseNovaU1::SenseNovaU1Runner>(backend_for(SDBackendModule::DIFFUSION),
                                                                                     tensor_storage_map,
                                                                                     "",
-                                                                                    model_manager);
+                                                                                    model_manager,
+                                                                                    sd_ctx_params->external_kv_prefix);
             } else if (sd_version_is_anima(version)) {
                 cond_stage_model = std::make_shared<AnimaConditioner>(backend_for(SDBackendModule::TE),
                                                                       tensor_storage_map,
@@ -1352,6 +1354,11 @@ public:
                     LOG_INFO("Using Conv2d direct in the diffusion model");
                     diffusion_model->set_conv2d_direct_enabled(true);
                 }
+            }
+
+            if (sd_ctx_params->external_kv_prefix && !diffusion_model->supports_kv_prefix()) {
+                LOG_ERROR("This model does not support external K/V prefixes");
+                return false;
             }
 
             cond_stage_model->set_max_graph_vram_bytes(max_graph_vram_bytes_for_module(SDBackendModule::TE));
@@ -3877,6 +3884,22 @@ struct sd_ctx_t {
     StableDiffusionGGML* sd = nullptr;
 };
 
+bool sd_set_kv_prefix(sd_ctx_t* sd_ctx, bool unconditional, const sd_kv_prefix_t* prefix) {
+    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || prefix == nullptr ||
+        prefix->token_ids == nullptr || prefix->token_count == 0 ||
+        prefix->token_count > static_cast<size_t>(INT64_MAX)) {
+        return false;
+    }
+    auto& sd = *sd_ctx->sd;
+    if (!sd.diffusion_model->set_kv_prefix(sd.n_threads, unconditional, *prefix)) {
+        return false;
+    }
+    auto& condition = sd.external_kv_conditions[unconditional ? 1 : 0];
+    condition.c_input_ids = sd::Tensor<int32_t>({static_cast<int64_t>(prefix->token_count)},
+                                              std::vector<int32_t>(prefix->token_ids, prefix->token_ids + prefix->token_count));
+    return true;
+}
+
 static bool sd_version_supports_video_generation(SDVersion version) {
     return version == VERSION_SVD || sd_version_is_wan(version) || sd_version_is_hunyuan_video(version) || sd_version_is_lingbot_video(version) || sd_version_is_ltxav(version) || sd_version_is_minimax_h3(version);
 }
@@ -5276,8 +5299,10 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
     sd_ctx->sd->compute_ip_adapter_tokens(sd_img_gen_params->ip_adapter_image, sd_img_gen_params->ip_adapter_strength);
     int64_t prepare_start_ms         = ggml_time_ms();
     condition_params.zero_out_masked = false;
-    auto cond                        = sd_ctx->sd->cond_stage_model->get_learned_condition(sd_ctx->sd->n_threads,
-                                                                                           condition_params);
+    auto cond = sd_ctx->sd->external_kv_conditions[0];
+    if (cond.empty()) {
+        cond = sd_ctx->sd->cond_stage_model->get_learned_condition(sd_ctx->sd->n_threads, condition_params);
+    }
     if (cond.c_concat.empty() && ref_image_params.pass_to_dit) {
         cond.c_concat = latents->concat_latent;  // TODO: optimize
     }
@@ -5288,7 +5313,9 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
 
     SDCondition uncond;
     if (request->use_uncond || request->use_high_noise_uncond) {
-        if (sd_version_is_ideogram4(sd_ctx->sd->version)) {
+        if (!sd_ctx->sd->external_kv_conditions[1].empty()) {
+            uncond = sd_ctx->sd->external_kv_conditions[1];
+        } else if (sd_version_is_ideogram4(sd_ctx->sd->version)) {
             uncond.c_vector = sd::Tensor<float>::from_vector({1.0f});
         } else if (sd_version_is_minit2i(sd_ctx->sd->version)) {
             // MiniT2I derives the unconditional signal from the same T5 hidden

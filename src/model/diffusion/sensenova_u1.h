@@ -298,22 +298,26 @@ namespace SenseNovaU1 {
         SenseNovaU1Config config;
         int layer_index;
 
-        Attention(const SenseNovaU1Config& config, int layer_index)
+        Attention(const SenseNovaU1Config& config, int layer_index, bool generation_only = false)
             : config(config), layer_index(layer_index) {
-            blocks["q_proj"]         = std::make_shared<Linear>(config.hidden_size, config.num_heads * config.head_dim, false);
-            blocks["k_proj"]         = std::make_shared<Linear>(config.hidden_size, config.num_kv_heads * config.head_dim, false);
-            blocks["v_proj"]         = std::make_shared<Linear>(config.hidden_size, config.num_kv_heads * config.head_dim, false);
-            blocks["o_proj"]         = std::make_shared<Linear>(config.num_heads * config.head_dim, config.hidden_size, false);
+            if (!generation_only) {
+                blocks["q_proj"]         = std::make_shared<Linear>(config.hidden_size, config.num_heads * config.head_dim, false);
+                blocks["k_proj"]         = std::make_shared<Linear>(config.hidden_size, config.num_kv_heads * config.head_dim, false);
+                blocks["v_proj"]         = std::make_shared<Linear>(config.hidden_size, config.num_kv_heads * config.head_dim, false);
+                blocks["o_proj"]         = std::make_shared<Linear>(config.num_heads * config.head_dim, config.hidden_size, false);
+            }
             blocks["q_proj_mot_gen"] = std::make_shared<Linear>(config.hidden_size, config.num_heads * config.head_dim, false);
             blocks["k_proj_mot_gen"] = std::make_shared<Linear>(config.hidden_size, config.num_kv_heads * config.head_dim, false);
             blocks["v_proj_mot_gen"] = std::make_shared<Linear>(config.hidden_size, config.num_kv_heads * config.head_dim, false);
             blocks["o_proj_mot_gen"] = std::make_shared<Linear>(config.num_heads * config.head_dim, config.hidden_size, false);
 
             const int64_t axis_dim      = config.head_dim / 2;
-            blocks["q_norm"]            = std::make_shared<LLM::LLMRMSNorm>(axis_dim, config.rms_norm_eps);
-            blocks["k_norm"]            = std::make_shared<LLM::LLMRMSNorm>(axis_dim, config.rms_norm_eps);
-            blocks["q_norm_hw"]         = std::make_shared<LLM::LLMRMSNorm>(axis_dim, config.rms_norm_eps);
-            blocks["k_norm_hw"]         = std::make_shared<LLM::LLMRMSNorm>(axis_dim, config.rms_norm_eps);
+            if (!generation_only) {
+                blocks["q_norm"]            = std::make_shared<LLM::LLMRMSNorm>(axis_dim, config.rms_norm_eps);
+                blocks["k_norm"]            = std::make_shared<LLM::LLMRMSNorm>(axis_dim, config.rms_norm_eps);
+                blocks["q_norm_hw"]         = std::make_shared<LLM::LLMRMSNorm>(axis_dim, config.rms_norm_eps);
+                blocks["k_norm_hw"]         = std::make_shared<LLM::LLMRMSNorm>(axis_dim, config.rms_norm_eps);
+            }
             blocks["q_norm_mot_gen"]    = std::make_shared<LLM::LLMRMSNorm>(axis_dim, config.rms_norm_eps);
             blocks["k_norm_mot_gen"]    = std::make_shared<LLM::LLMRMSNorm>(axis_dim, config.rms_norm_eps);
             blocks["q_norm_hw_mot_gen"] = std::make_shared<LLM::LLMRMSNorm>(axis_dim, config.rms_norm_eps);
@@ -475,14 +479,16 @@ namespace SenseNovaU1 {
     };
 
     struct TransformerBlock : public GGMLBlock {
-        TransformerBlock(const SenseNovaU1Config& config, int layer_index) {
-            blocks["self_attn"]                        = std::make_shared<Attention>(config, layer_index);
-            blocks["mlp"]                              = std::make_shared<LLM::MLP>(config.hidden_size, config.intermediate_size, false);
+        TransformerBlock(const SenseNovaU1Config& config, int layer_index, bool generation_only = false) {
+            blocks["self_attn"]                        = std::make_shared<Attention>(config, layer_index, generation_only);
             blocks["mlp_mot_gen"]                      = std::make_shared<LLM::MLP>(config.hidden_size, config.intermediate_size, false);
-            blocks["input_layernorm"]                  = std::make_shared<LLM::LLMRMSNorm>(config.hidden_size, config.rms_norm_eps);
             blocks["input_layernorm_mot_gen"]          = std::make_shared<LLM::LLMRMSNorm>(config.hidden_size, config.rms_norm_eps);
-            blocks["post_attention_layernorm"]         = std::make_shared<LLM::LLMRMSNorm>(config.hidden_size, config.rms_norm_eps);
             blocks["post_attention_layernorm_mot_gen"] = std::make_shared<LLM::LLMRMSNorm>(config.hidden_size, config.rms_norm_eps);
+            if (!generation_only) {
+                blocks["mlp"]                              = std::make_shared<LLM::MLP>(config.hidden_size, config.intermediate_size, false);
+                blocks["input_layernorm"]                  = std::make_shared<LLM::LLMRMSNorm>(config.hidden_size, config.rms_norm_eps);
+                blocks["post_attention_layernorm"]         = std::make_shared<LLM::LLMRMSNorm>(config.hidden_size, config.rms_norm_eps);
+            }
         }
 
         ggml_tensor* forward(GGMLRunnerContext* ctx,
@@ -523,13 +529,15 @@ namespace SenseNovaU1 {
     struct TextModel : public GGMLBlock {
         SenseNovaU1Config config;
 
-        explicit TextModel(const SenseNovaU1Config& config)
+        explicit TextModel(const SenseNovaU1Config& config, bool generation_only = false)
             : config(config) {
-            blocks["embed_tokens"] = std::make_shared<Embedding>(config.vocab_size, config.hidden_size);
-            for (int i = 0; i < config.num_layers; ++i) {
-                blocks["layers." + std::to_string(i)] = std::make_shared<TransformerBlock>(config, i);
+            if (!generation_only) {
+                blocks["embed_tokens"] = std::make_shared<Embedding>(config.vocab_size, config.hidden_size);
+                blocks["norm"] = std::make_shared<LLM::LLMRMSNorm>(config.hidden_size, config.rms_norm_eps);
             }
-            blocks["norm"]         = std::make_shared<LLM::LLMRMSNorm>(config.hidden_size, config.rms_norm_eps);
+            for (int i = 0; i < config.num_layers; ++i) {
+                blocks["layers." + std::to_string(i)] = std::make_shared<TransformerBlock>(config, i, generation_only);
+            }
             blocks["norm_mot_gen"] = std::make_shared<LLM::LLMRMSNorm>(config.hidden_size, config.rms_norm_eps);
         }
 
@@ -565,9 +573,9 @@ namespace SenseNovaU1 {
     struct SenseNovaU1Model : public GGMLBlock {
         SenseNovaU1Config config;
 
-        explicit SenseNovaU1Model(const SenseNovaU1Config& config)
+        explicit SenseNovaU1Model(const SenseNovaU1Config& config, bool generation_only = false)
             : config(config) {
-            blocks["language_model.model"]                       = std::make_shared<TextModel>(config);
+            blocks["language_model.model"]                       = std::make_shared<TextModel>(config, generation_only);
             blocks["fm_modules.vision_model_mot_gen.embeddings"] = std::make_shared<VisionEmbeddings>(config);
             blocks["fm_modules.timestep_embedder"]               = std::make_shared<TimestepEmbedder>(config.hidden_size,
                                                                                                       config.timestep_embedding_size);
@@ -605,7 +613,9 @@ namespace SenseNovaU1 {
     struct SenseNovaU1Runner : public DiffusionModelRunner {
         SenseNovaU1Config config;
         SenseNovaU1Model model;
+        bool external_prefix;
         std::unordered_set<uint64_t> cached_prefix_hashes;
+        std::map<uint64_t, std::string> imported_prefixes;
         std::vector<int32_t> position_t_vec;
         std::vector<int32_t> position_h_vec;
         std::vector<int32_t> position_w_vec;
@@ -617,10 +627,12 @@ namespace SenseNovaU1 {
         SenseNovaU1Runner(ggml_backend_t backend,
                           const String2TensorStorage& tensor_storage_map      = {},
                           const std::string& prefix                           = "",
-                          std::shared_ptr<RunnerWeightManager> weight_manager = nullptr)
+                          std::shared_ptr<RunnerWeightManager> weight_manager = nullptr,
+                          bool external_prefix = false)
             : DiffusionModelRunner(backend, prefix, weight_manager),
               config(SenseNovaU1Config::detect_from_weights(tensor_storage_map, prefix)),
-              model(config) {
+              model(config, external_prefix),
+              external_prefix(external_prefix) {
             model.init(params_ctx, tensor_storage_map, prefix);
         }
 
@@ -650,6 +662,63 @@ namespace SenseNovaU1 {
 
         static std::string cache_prefix(uint64_t hash) {
             return "snu15." + std::to_string(hash);
+        }
+
+        bool supports_kv_prefix() const override { return true; }
+
+        bool set_kv_prefix(int n_threads, bool unconditional, const sd_kv_prefix_t& data) override {
+            constexpr size_t max_prefix_tokens = 12288;
+            const auto keys = data.keys;
+            const auto values = data.values;
+            const auto layers = data.layer_count;
+            if (!external_prefix || data.token_ids == nullptr || data.token_count == 0 ||
+                data.token_count > max_prefix_tokens || layers != static_cast<size_t>(config.num_layers) ||
+                keys == nullptr || values == nullptr) {
+                return false;
+            }
+            sd::Tensor<int32_t> ids({static_cast<int64_t>(data.token_count)},
+                                    std::vector<int32_t>(data.token_ids, data.token_ids + data.token_count));
+            for (size_t i = 0; i < layers; ++i) {
+                for (auto tensor : {keys[i], values[i]}) {
+                    if (tensor == nullptr || tensor->ne[0] != config.head_dim ||
+                        tensor->ne[1] != config.num_kv_heads || tensor->ne[2] != ids.numel() ||
+                        tensor->ne[3] != 1 || !ggml_is_contiguous(tensor) ||
+                        (tensor->type != GGML_TYPE_F16 && tensor->type != GGML_TYPE_BF16 &&
+                         tensor->type != GGML_TYPE_F32)) {
+                        LOG_ERROR("Invalid SenseNova U1.5 prefix at layer %zu", i);
+                        return false;
+                    }
+                }
+            }
+            const auto hash = hash_input_ids(ids);
+            const std::string prefix = unconditional ? "snu15.unconditional" : "snu15.conditional";
+            auto get_graph = [&]() {
+                auto graph = new_graph_custom(SENSENOVA_U1_GRAPH_SIZE);
+                for (size_t i = 0; i < layers; ++i) {
+                    const auto name = prefix + "." + std::to_string(i);
+                    auto k = ggml_cast(compute_ctx, to_backend(keys[i]), GGML_TYPE_F32);
+                    auto v = ggml_cast(compute_ctx, to_backend(values[i]), GGML_TYPE_F32);
+                    ggml_set_output(k);
+                    ggml_set_output(v);
+                    cache(name + ".k", k);
+                    cache(name + ".v", v);
+                    ggml_build_forward_expand(graph, k);
+                    ggml_build_forward_expand(graph, v);
+                }
+                return graph;
+            };
+            if (!GGMLRunner::compute<float>(get_graph, n_threads, false, true, true, true).has_value()) {
+                return false;
+            }
+            for (auto it = imported_prefixes.begin(); it != imported_prefixes.end();) {
+                if (it->second == prefix) {
+                    it = imported_prefixes.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            imported_prefixes[hash] = prefix;
+            return true;
         }
 
         ggml_tensor* make_position_tensor(const std::vector<int32_t>& values,
@@ -708,6 +777,15 @@ namespace SenseNovaU1 {
                                  const sd::Tensor<int32_t>& input_ids,
                                  std::string* prefix_cache) {
             const uint64_t hash = hash_input_ids(input_ids);
+            if (external_prefix) {
+                const auto it = imported_prefixes.find(hash);
+                if (it != imported_prefixes.end() && get_cache_tensor_by_name(it->second + ".0.k") != nullptr) {
+                    *prefix_cache = it->second;
+                    return true;
+                }
+                LOG_ERROR("SenseNova U1.5 requires an imported prefix for this token sequence");
+                return false;
+            }
             *prefix_cache       = cache_prefix(hash);
             if (cached_prefix_hashes.find(hash) != cached_prefix_hashes.end() &&
                 get_cache_tensor_by_name(*prefix_cache + ".0.k") != nullptr) {

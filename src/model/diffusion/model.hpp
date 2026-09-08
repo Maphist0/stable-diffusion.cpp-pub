@@ -5,6 +5,7 @@
 #include <utility>
 #include <variant>
 
+#include "stable-diffusion.h"
 #include "core/ggml_extend.hpp"
 #include "core/tensor_ggml.hpp"
 #include "model/common/rope.hpp"
@@ -172,6 +173,9 @@ public:
                          std::shared_ptr<RunnerWeightManager> weight_manager = nullptr)
         : GGMLRunner(backend, weight_manager),
           prefix(prefix) {}
+
+    virtual bool supports_kv_prefix() const { return false; }
+    virtual bool set_kv_prefix(int, bool, const sd_kv_prefix_t&) { return false; }
 
     virtual sd::Tensor<float> compute(int n_threads,
                                       const DiffusionParams& diffusion_params) = 0;

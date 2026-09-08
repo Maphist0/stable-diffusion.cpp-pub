@@ -239,6 +239,7 @@ typedef struct {
     bool auto_fit;
     const char* rpc_servers;
     const char* model_args;
+    bool external_kv_prefix;  // Skip understanding weights; require imported K/V conditioning.
 } sd_ctx_params_t;
 
 typedef struct {
@@ -487,6 +488,26 @@ SD_API char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params);
 
 SD_API sd_ctx_t* new_sd_ctx(const sd_ctx_params_t* sd_ctx_params);
 SD_API void free_sd_ctx(sd_ctx_t* sd_ctx);
+
+// A completed, unshifted sequence starting at position zero. K is post-RoPE;
+// V is unrotated. Each layer uses contiguous [head_dim, kv_heads, tokens, 1]
+// tensors in F16, BF16 or F32. Producer weights and positional semantics must
+// match the receiving model. The model validates its layer and head dimensions.
+struct ggml_tensor;
+typedef struct {
+    const int32_t* token_ids;
+    size_t token_count;
+    struct ggml_tensor* const* keys;
+    struct ggml_tensor* const* values;
+    size_t layer_count;
+} sd_kv_prefix_t;
+
+// Requires external_kv_prefix. Copies one branch; the other branch is retained.
+// Synchronize the producer before calling. Input storage may be freed on return.
+// Unsupported models and invalid prefixes return false. Guided generation needs
+// both conditional and unconditional branches before generate_image.
+SD_API bool sd_set_kv_prefix(sd_ctx_t* sd_ctx, bool unconditional, const sd_kv_prefix_t* prefix);
+
 SD_API void free_sd_audio(sd_audio_t* audio);
 
 SD_API void sd_sample_params_init(sd_sample_params_t* sample_params);
