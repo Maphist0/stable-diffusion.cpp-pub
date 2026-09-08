@@ -609,6 +609,8 @@ namespace SenseNovaU1 {
         std::vector<int32_t> position_t_vec;
         std::vector<int32_t> position_h_vec;
         std::vector<int32_t> position_w_vec;
+        std::vector<int32_t> vision_position_h_vec;
+        std::vector<int32_t> vision_position_w_vec;
         std::vector<float> attention_mask_vec;
         std::vector<float> noise_scale_vec;
 
@@ -750,14 +752,15 @@ namespace SenseNovaU1 {
             const int64_t token_h = grid_h / config.vision_downsample_factor;
             const int64_t tokens  = token_w * token_h;
 
-            position_h_vec.resize(grid_w * grid_h);
-            position_w_vec.resize(grid_w * grid_h);
+            // Upload is deferred until compute; image-token positions need separate storage.
+            vision_position_h_vec.resize(grid_w * grid_h);
+            vision_position_w_vec.resize(grid_w * grid_h);
             for (int64_t index = 0; index < grid_w * grid_h; ++index) {
-                position_h_vec[index] = static_cast<int32_t>(index / grid_w);
-                position_w_vec[index] = static_cast<int32_t>(index % grid_w);
+                vision_position_h_vec[index] = static_cast<int32_t>(index / grid_w);
+                vision_position_w_vec[index] = static_cast<int32_t>(index % grid_w);
             }
-            auto vision_position_x = make_position_tensor(position_w_vec, "snu15.vision.position_x");
-            auto vision_position_y = make_position_tensor(position_h_vec, "snu15.vision.position_y");
+            auto vision_position_x = make_position_tensor(vision_position_w_vec, "snu15.vision.position_x");
+            auto vision_position_y = make_position_tensor(vision_position_h_vec, "snu15.vision.position_y");
 
             auto runner_ctx     = get_context();
             auto hidden         = model.vision_embeddings()->forward(&runner_ctx,
