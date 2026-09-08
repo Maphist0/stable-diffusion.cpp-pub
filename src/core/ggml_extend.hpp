@@ -1039,6 +1039,7 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_linear(ggml_context* ctx,
     return x;
 }
 
+#ifndef SD_DISABLE_GGML_QUANT_EXTENSIONS
 __STATIC_INLINE__ ggml_tensor* ggml_ext_linear_i8_tensorwise(ggml_context* ctx,
                                                              ggml_tensor* x,
                                                              ggml_tensor* w,
@@ -1070,6 +1071,8 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_linear_i8_tensorwise(ggml_context* ctx,
     }
     return x;
 }
+
+#endif
 
 __STATIC_INLINE__ ggml_tensor* ggml_ext_pad_ext(ggml_context* ctx,
                                                 ggml_backend_t backend,
@@ -3469,6 +3472,7 @@ public:
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
         ggml_tensor* w            = params["weight"];
         ggml_tensor* weight_scale = has_weight_scale ? params["weight_scale"] : nullptr;
+#ifndef SD_DISABLE_GGML_QUANT_EXTENSIONS
         if (w->type == GGML_TYPE_F8_E4M3 || w->type == GGML_TYPE_F8_E5M2) {
             bool supports_fp8_matmul = false;
             if (ctx->backend != nullptr) {
@@ -3482,6 +3486,7 @@ public:
                 w = ggml_cast(ctx->ggml_ctx, w, GGML_TYPE_BF16);
             }
         }
+#endif
         ggml_tensor* b = nullptr;
         if (bias) {
             b = params["bias"];
@@ -3489,6 +3494,9 @@ public:
         ggml_tensor* linear_bias = has_weight_scale ? nullptr : b;
         ggml_tensor* out         = nullptr;
         if (w->type == GGML_TYPE_I8) {
+#ifdef SD_DISABLE_GGML_QUANT_EXTENSIONS
+            GGML_ABORT("Tensorwise INT8 requires SD_GGML_QUANT_EXTENSIONS");
+#else
             if (x->type != GGML_TYPE_F32) {
                 x = ggml_ext_cast_f32(ctx->ggml_ctx, ctx->backend, x);
             }
@@ -3530,6 +3538,7 @@ public:
                                                                                                forward_params);
             }
             return out;
+#endif
         }
         if (has_weight_scale) {
             out = ggml_ext_linear(ctx->ggml_ctx, x, w, nullptr, force_prec_f32, scale);

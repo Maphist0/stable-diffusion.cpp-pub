@@ -86,10 +86,12 @@ static ggml_type safetensors_dtype_to_ggml_type(const std::string& dtype) {
         ttype = GGML_TYPE_F32;
     } else if (dtype == "F64") {
         ttype = GGML_TYPE_F32;
+#ifndef SD_DISABLE_GGML_QUANT_EXTENSIONS
     } else if (dtype == "F8_E4M3") {
         ttype = GGML_TYPE_F8_E4M3;
     } else if (dtype == "F8_E5M2") {
         ttype = GGML_TYPE_F8_E5M2;
+#endif
     } else if (dtype == "I32") {
         ttype = GGML_TYPE_I32;
     } else if (dtype == "I64") {
@@ -294,6 +296,10 @@ bool read_safetensors_file(const std::string& file_path,
             const std::string module_name = name.substr(0, name.size() - std::string(".weight").size());
             auto config                   = comfy_quant_configs.find(module_name);
             if (config != comfy_quant_configs.end() && config->second.format == "int8_tensorwise") {
+#ifdef SD_DISABLE_GGML_QUANT_EXTENSIONS
+                set_error(error, "Tensorwise INT8 requires SD_GGML_QUANT_EXTENSIONS");
+                return false;
+#endif
                 if (type != GGML_TYPE_I8) {
                     set_error(error, "ComfyUI int8_tensorwise weight is not I8: '" + name + "'");
                     return false;
