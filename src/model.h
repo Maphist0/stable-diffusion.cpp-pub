@@ -306,7 +306,7 @@ static inline bool sd_version_is_dit(SDVersion version) {
         sd_version_is_sefi_image(version) ||
         sd_version_is_krea2(version) ||
         sd_version_is_mage_flow(version) ||
-        sd_version_is_sensenova_u1(version) || sd_version_is_bagel(version) {
+        sd_version_is_sensenova_u1(version) || sd_version_is_bagel(version)) {
         return true;
     }
     return false;
