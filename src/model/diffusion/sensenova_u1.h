@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -576,6 +577,7 @@ namespace SenseNovaU1 {
         explicit SenseNovaU1Model(const SenseNovaU1Config& config, bool generation_only = false)
             : config(config) {
             blocks["language_model.model"]                       = std::make_shared<TextModel>(config, generation_only);
+            blocks["vision_model.embeddings"]                    = std::make_shared<VisionEmbeddings>(config);
             blocks["fm_modules.vision_model_mot_gen.embeddings"] = std::make_shared<VisionEmbeddings>(config);
             blocks["fm_modules.timestep_embedder"]               = std::make_shared<TimestepEmbedder>(config.hidden_size,
                                                                                                       config.timestep_embedding_size);
@@ -592,6 +594,10 @@ namespace SenseNovaU1 {
 
         std::shared_ptr<VisionEmbeddings> vision_embeddings() {
             return std::dynamic_pointer_cast<VisionEmbeddings>(blocks["fm_modules.vision_model_mot_gen.embeddings"]);
+        }
+
+        std::shared_ptr<VisionEmbeddings> understanding_vision_embeddings() {
+            return std::dynamic_pointer_cast<VisionEmbeddings>(blocks["vision_model.embeddings"]);
         }
 
         std::shared_ptr<TimestepEmbedder> timestep_embedder() {
@@ -616,6 +622,7 @@ namespace SenseNovaU1 {
         bool external_prefix;
         std::unordered_set<uint64_t> cached_prefix_hashes;
         std::map<uint64_t, std::string> imported_prefixes;
+        std::map<uint64_t, int64_t> imported_prefix_lengths;
         std::vector<int32_t> position_t_vec;
         std::vector<int32_t> position_h_vec;
         std::vector<int32_t> position_w_vec;
@@ -645,7 +652,7 @@ namespace SenseNovaU1 {
             model.get_param_tensors(tensors, prefix);
         }
 
-        static uint64_t hash_input_ids(const sd::Tensor<int32_t>& input_ids) {
+        static uint64_t hash_input_ids(const sd::Tensor<int32_t>& input_ids, int slot = 0) {
             uint64_t hash = 1469598103934665603ULL;
             for (int32_t token : input_ids.values()) {
                 uint32_t value = static_cast<uint32_t>(token);
@@ -657,6 +664,8 @@ namespace SenseNovaU1 {
             }
             hash ^= static_cast<uint64_t>(input_ids.numel());
             hash *= 1099511628211ULL;
+            hash ^= static_cast<uint64_t>(slot + 1);
+            hash *= 1099511628211ULL;
             return hash;
         }
 
@@ -667,14 +676,35 @@ namespace SenseNovaU1 {
         bool supports_kv_prefix() const override { return true; }
 
         bool set_kv_prefix(int n_threads, bool unconditional, const sd_kv_prefix_t& data) override {
+            return set_kv_prefix_slot(n_threads, unconditional ? 1 : 0, data);
+        }
+
+        static const char* prefix_name(int slot) {
+            switch (slot) {
+                case 0: return "snu15.conditional";
+                case 1: return "snu15.without_text";
+                case 2: return "snu15.without_image";
+                default: return nullptr;
+            }
+        }
+
+        bool set_kv_prefix_slot(int n_threads, int slot, const sd_kv_prefix_t& data) override {
             constexpr size_t max_prefix_tokens = 12288;
+            const char* prefix_name_value = prefix_name(slot);
             const auto keys = data.keys;
             const auto values = data.values;
             const auto layers = data.layer_count;
-            if (!external_prefix || data.token_ids == nullptr || data.token_count == 0 ||
+            if (!external_prefix || prefix_name_value == nullptr || data.token_ids == nullptr || data.token_count == 0 ||
                 data.token_count > max_prefix_tokens || layers != static_cast<size_t>(config.num_layers) ||
                 keys == nullptr || values == nullptr) {
                 return false;
+            }
+            if (data.positions) {
+                for (size_t i = 0; i < data.token_count; ++i) {
+                    if (data.positions[i] < 0 || (i && data.positions[i] < data.positions[i - 1])) {
+                        return false;
+                    }
+                }
             }
             sd::Tensor<int32_t> ids({static_cast<int64_t>(data.token_count)},
                                     std::vector<int32_t>(data.token_ids, data.token_ids + data.token_count));
@@ -690,8 +720,14 @@ namespace SenseNovaU1 {
                     }
                 }
             }
-            const auto hash = hash_input_ids(ids);
-            const std::string prefix = unconditional ? "snu15.unconditional" : "snu15.conditional";
+            const auto hash = hash_input_ids(ids, slot);
+            const std::string prefix(prefix_name_value);
+            const int64_t prefix_length = data.positions
+                                              ? static_cast<int64_t>(data.positions[data.token_count - 1]) + 1
+                                              : static_cast<int64_t>(data.token_count);
+            if (prefix_length <= 0 || prefix_length > max_prefix_tokens) {
+                return false;
+            }
             auto get_graph = [&]() {
                 auto graph = new_graph_custom(SENSENOVA_U1_GRAPH_SIZE);
                 for (size_t i = 0; i < layers; ++i) {
@@ -712,13 +748,49 @@ namespace SenseNovaU1 {
             }
             for (auto it = imported_prefixes.begin(); it != imported_prefixes.end();) {
                 if (it->second == prefix) {
+                    imported_prefix_lengths.erase(it->first);
                     it = imported_prefixes.erase(it);
                 } else {
                     ++it;
                 }
             }
             imported_prefixes[hash] = prefix;
+            imported_prefix_lengths[hash] = prefix_length;
             return true;
+        }
+
+        sd::Tensor<float> encode_understanding_image(int n_threads, const sd::Tensor<float>& image) {
+            if (image.dim() != 4 || image.shape()[2] != config.in_channels || image.shape()[3] != 1 ||
+                image.shape()[0] < config.image_token_stride() ||
+                image.shape()[1] < config.image_token_stride() ||
+                image.shape()[0] % config.image_token_stride() ||
+                image.shape()[1] % config.image_token_stride()) {
+                return {};
+            }
+            const int64_t grid_w = image.shape()[0] / config.patch_size;
+            const int64_t grid_h = image.shape()[1] / config.patch_size;
+            vision_position_h_vec.resize(grid_w * grid_h);
+            vision_position_w_vec.resize(grid_w * grid_h);
+            for (int64_t index = 0; index < grid_w * grid_h; ++index) {
+                vision_position_h_vec[index] = static_cast<int32_t>(index / grid_w);
+                vision_position_w_vec[index] = static_cast<int32_t>(index % grid_w);
+            }
+            auto get_graph = [&]() {
+                auto graph = new_graph_custom(SENSENOVA_U1_GRAPH_SIZE);
+                auto image_input = make_input(image);
+                auto position_x = make_position_tensor(vision_position_w_vec, "snu15.understanding.position_x");
+                auto position_y = make_position_tensor(vision_position_h_vec, "snu15.understanding.position_y");
+                auto runner_ctx = get_context();
+                auto hidden = model.understanding_vision_embeddings()->forward(&runner_ctx,
+                                                                                image_input,
+                                                                                position_x,
+                                                                                position_y);
+                ggml_build_forward_expand(graph, hidden);
+                return graph;
+            };
+            return restore_trailing_singleton_dims(
+                GGMLRunner::compute<float>(get_graph, n_threads, false, false, false),
+                3);
         }
 
         ggml_tensor* make_position_tensor(const std::vector<int32_t>& values,
@@ -775,18 +847,22 @@ namespace SenseNovaU1 {
 
         bool ensure_prefix_cache(int n_threads,
                                  const sd::Tensor<int32_t>& input_ids,
-                                 std::string* prefix_cache) {
-            const uint64_t hash = hash_input_ids(input_ids);
+                                 int slot,
+                                 std::string* prefix_cache,
+                                 int64_t* prefix_length) {
+            const uint64_t hash = hash_input_ids(input_ids, slot);
             if (external_prefix) {
                 const auto it = imported_prefixes.find(hash);
                 if (it != imported_prefixes.end() && get_cache_tensor_by_name(it->second + ".0.k") != nullptr) {
                     *prefix_cache = it->second;
+                    *prefix_length = imported_prefix_lengths.at(hash);
                     return true;
                 }
                 LOG_ERROR("SenseNova U1.5 requires an imported prefix for this token sequence");
                 return false;
             }
             *prefix_cache       = cache_prefix(hash);
+            *prefix_length      = input_ids.numel();
             if (cached_prefix_hashes.find(hash) != cached_prefix_hashes.end() &&
                 get_cache_tensor_by_name(*prefix_cache + ".0.k") != nullptr) {
                 return true;
@@ -903,12 +979,21 @@ namespace SenseNovaU1 {
                                   const sd::Tensor<float>& x,
                                   const sd::Tensor<float>& timestep,
                                   const sd::Tensor<int32_t>& input_ids) {
+            return compute(n_threads, x, timestep, input_ids, 0);
+        }
+
+        sd::Tensor<float> compute(int n_threads,
+                                  const sd::Tensor<float>& x,
+                                  const sd::Tensor<float>& timestep,
+                                  const sd::Tensor<int32_t>& input_ids,
+                                  int slot) {
             std::string prefix_cache;
-            if (!ensure_prefix_cache(n_threads, input_ids, &prefix_cache)) {
+            int64_t prefix_length = 0;
+            if (!ensure_prefix_cache(n_threads, input_ids, slot, &prefix_cache, &prefix_length)) {
                 return {};
             }
             auto get_graph = [&]() {
-                return build_graph(x, timestep, prefix_cache, input_ids.numel());
+                return build_graph(x, timestep, prefix_cache, prefix_length);
             };
             return restore_trailing_singleton_dims(
                 GGMLRunner::compute<float>(get_graph, n_threads, false, false, false),
@@ -924,7 +1009,8 @@ namespace SenseNovaU1 {
             return compute(n_threads,
                            *diffusion_params.x,
                            *diffusion_params.timesteps,
-                           *extra->input_ids);
+                           *extra->input_ids,
+                           extra->kv_prefix_slot >= 0 ? extra->kv_prefix_slot : 0);
         }
     };
 }  // namespace SenseNovaU1

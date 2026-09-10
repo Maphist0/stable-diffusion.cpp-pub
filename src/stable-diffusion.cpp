@@ -2832,7 +2832,8 @@ public:
                         condition.c_vector.empty() ? nullptr : &condition.c_vector};
                 } else if (sd_version_is_sensenova_u1(version)) {
                     diffusion_params.extra = SenseNovaU1DiffusionExtra{
-                        condition.c_input_ids.empty() ? nullptr : &condition.c_input_ids};
+                        condition.c_input_ids.empty() ? nullptr : &condition.c_input_ids,
+                        kv_prefix_slot};
                 } else {
                     diffusion_params.extra = std::monostate{};
                 }
@@ -3964,6 +3965,67 @@ bool sd_encode_image_prefix(sd_ctx_t* sd_ctx, int slot, const sd_image_t* image,
         LOG_ERROR("Image prefix encoding failed: %s", error.what());
         return false;
     }
+}
+
+bool sd_encode_sensenova_u1_image(sd_ctx_t* sd_ctx, const sd_image_t* image,
+                                  float** embeddings_out, size_t* token_count_out,
+                                  size_t* embedding_dim_out) {
+    if (!sd_ctx || !sd_ctx->sd || !image || !image->data || image->channel != 3 ||
+        !image->width || !image->height || !embeddings_out || !token_count_out || !embedding_dim_out) {
+        return false;
+    }
+    *embeddings_out = nullptr;
+    *token_count_out = 0;
+    *embedding_dim_out = 0;
+    auto& sd = *sd_ctx->sd;
+    if (!sd_version_is_sensenova_u1(sd.version)) {
+        return false;
+    }
+    auto* runner = dynamic_cast<SenseNovaU1::SenseNovaU1Runner *>(sd.diffusion_model.get());
+    if (!runner) {
+        return false;
+    }
+    try {
+        auto tensor = sd_image_to_tensor(*image);
+        static constexpr float mean[] = {0.485f, 0.456f, 0.406f};
+        static constexpr float stddev[] = {0.229f, 0.224f, 0.225f};
+        for (int64_t x = 0; x < tensor.shape()[0]; ++x) {
+            for (int64_t y = 0; y < tensor.shape()[1]; ++y) {
+                for (int c = 0; c < 3; ++c) {
+                    tensor.index(x, y, c, 0) = (tensor.index(x, y, c, 0) - mean[c]) / stddev[c];
+                }
+            }
+        }
+        auto hidden = runner->encode_understanding_image(sd.n_threads, tensor);
+        if (hidden.empty() || hidden.dim() != 3 || hidden.shape()[2] != 1 ||
+            hidden.shape()[0] <= 0 || hidden.shape()[1] <= 0) {
+            return false;
+        }
+        const size_t embedding_dim = static_cast<size_t>(hidden.shape()[0]);
+        const size_t token_count = static_cast<size_t>(hidden.shape()[1]);
+        const size_t count = token_count * embedding_dim;
+        auto* output = static_cast<float*>(std::malloc(count * sizeof(float)));
+        if (!output) {
+            return false;
+        }
+        for (size_t token = 0; token < token_count; ++token) {
+            for (size_t dim = 0; dim < embedding_dim; ++dim) {
+                output[token * embedding_dim + dim] =
+                    hidden.index(static_cast<int64_t>(dim), static_cast<int64_t>(token), 0);
+            }
+        }
+        *embeddings_out = output;
+        *token_count_out = token_count;
+        *embedding_dim_out = embedding_dim;
+        return true;
+    } catch (const std::exception& error) {
+        LOG_ERROR("SenseNova U1 image encoding failed: %s", error.what());
+        return false;
+    }
+}
+
+void sd_free_buffer(void* data) {
+    std::free(data);
 }
 
 static bool sd_version_supports_video_generation(SDVersion version) {

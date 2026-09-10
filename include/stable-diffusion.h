@@ -518,6 +518,14 @@ SD_API bool sd_set_kv_prefix_slot(sd_ctx_t* sd_ctx, int slot, const sd_kv_prefix
 SD_API bool sd_encode_image_prefix(sd_ctx_t* sd_ctx, int slot, const sd_image_t* image,
                                    int64_t seed, sd_kv_prefix_t* output);
 
+// Encode a preprocessed RGB image with the native SenseNova U1 understanding
+// vision encoder. The returned buffer is token-major [token_count, embedding_dim].
+// The caller owns it and releases it with sd_free_buffer().
+SD_API bool sd_encode_sensenova_u1_image(sd_ctx_t* sd_ctx, const sd_image_t* image,
+                                         float** embeddings_out, size_t* token_count_out,
+                                         size_t* embedding_dim_out);
+SD_API void sd_free_buffer(void* data);
+
 SD_API void free_sd_audio(sd_audio_t* audio);
 
 SD_API void sd_sample_params_init(sd_sample_params_t* sample_params);

@@ -117,6 +117,7 @@ struct MiniT2IDiffusionExtra {
 
 struct SenseNovaU1DiffusionExtra {
     const sd::Tensor<int32_t>* input_ids = nullptr;
+    int kv_prefix_slot = -1;
 };
 
 struct HunyuanVideoDiffusionExtra {
