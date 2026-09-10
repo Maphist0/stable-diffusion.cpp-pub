@@ -482,3 +482,5 @@ struct Runner : public DiffusionModelRunner {
 };
 
 }  // namespace Bagel
+
+#endif  // __SD_MODEL_DIFFUSION_BAGEL_H__
