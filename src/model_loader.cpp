@@ -407,7 +407,17 @@ static bool has_sensenova_u1_signature(const String2TensorStorage& tensors) {
            tensors.find("fm_modules.fm_head.conv1.weight") != tensors.end();
 }
 
+static bool has_bagel_signature(const String2TensorStorage& tensors) {
+    // The generation expert and its latent/text bridge are unique to BAGEL.
+    return tensors.find("language_model.model.layers.0.self_attn.q_proj_moe_gen.weight") != tensors.end() &&
+           tensors.find("vae2llm.weight") != tensors.end() &&
+           tensors.find("llm2vae.weight") != tensors.end();
+}
+
 SDVersion ModelLoader::get_sd_version() {
+    if (has_bagel_signature(tensor_storage_map)) {
+        return VERSION_BAGEL;
+    }
     if (has_sensenova_u1_signature(tensor_storage_map)) {
         return VERSION_SENSENOVA_U1_5;
     }

@@ -45,6 +45,7 @@
 #include "model/diffusion/pid.hpp"
 #include "model/diffusion/qwen_image.hpp"
 #include "model/diffusion/sensenova_u1.h"
+#include "model/diffusion/bagel.h"
 #include "model/diffusion/unet.hpp"
 #include "model/diffusion/wan.hpp"
 #include "model/diffusion/z_image.hpp"
@@ -126,6 +127,7 @@ const char* model_version_to_str[] = {
     "Krea2",
     "Mage Flow",
     "SenseNova U1.5",
+    "BAGEL-7B-MoT",
     "ESRGAN",
 };
 
@@ -169,7 +171,7 @@ static bool sd_version_supports_ref_latent_img_cfg(SDVersion version) {
 }
 
 static bool sd_version_supports_img_cfg(SDVersion version, bool has_ref_images) {
-    return sd_version_is_inpaint_or_unet_edit(version) ||
+    return sd_version_is_bagel(version) || sd_version_is_inpaint_or_unet_edit(version) ||
            (has_ref_images && sd_version_supports_ref_latent_img_cfg(version));
 }
 
@@ -229,7 +231,11 @@ public:
     float active_flow_shift          = INFINITY;
 
     std::shared_ptr<Conditioner> cond_stage_model;
-    SDCondition external_kv_conditions[2];
+    struct ExternalKVCondition {
+        SDCondition value;
+        bool active = false;
+    };
+    ExternalKVCondition external_kv_conditions[3];
     std::shared_ptr<FrozenCLIPVisionEmbedder> clip_vision;  // for svd or wan2.1 i2v
     std::shared_ptr<DiffusionModelRunner> diffusion_model;
     std::shared_ptr<DiffusionModelRunner> high_noise_diffusion_model;
@@ -1274,6 +1280,10 @@ public:
                                                                            tensor_storage_map,
                                                                            "model.diffusion_model.model.net",
                                                                            model_manager);
+            } else if (sd_version_is_bagel(version)) {
+                cond_stage_model = std::make_shared<Bagel::ExternalKVConditioner>();
+                diffusion_model = std::make_shared<Bagel::Runner>(backend_for(SDBackendModule::DIFFUSION),
+                                                                  tensor_storage_map, model_manager);
             } else if (sd_version_is_sensenova_u1(version)) {
                 cond_stage_model = std::make_shared<SenseNovaU1Conditioner>();
                 diffusion_model  = std::make_shared<SenseNovaU1::SenseNovaU1Runner>(backend_for(SDBackendModule::DIFFUSION),
@@ -1827,7 +1837,8 @@ public:
                     } else {
                         default_flow_shift = 3.f;
                     }
-                } else if (sd_version_is_flux(version) ||
+                } else if (sd_version_is_bagel(version) ||
+                           sd_version_is_flux(version) ||
                            sd_version_is_flux2(version) ||
                            sd_version_is_longcat(version) ||
                            sd_version_is_lens(version) ||
@@ -1890,7 +1901,12 @@ public:
                 }
                 case FLUX_FLOW_PRED: {
                     LOG_INFO("running in Flux FLOW mode");
-                    denoiser = std::make_shared<FluxFlowDenoiser>();
+                    if (sd_version_is_bagel(version)) {
+                        denoiser = std::make_shared<Bagel::BagelFlowDenoiser>();
+                        default_flow_shift = 3.f;
+                    } else {
+                        denoiser = std::make_shared<FluxFlowDenoiser>();
+                    }
                     break;
                 }
                 case SEFI_FLOW_PRED: {
@@ -2752,7 +2768,8 @@ public:
                                      const sd::Tensor<float>* c_concat_override                 = nullptr,
                                      const std::vector<int>* local_skip_layers                  = nullptr,
                                      const std::vector<sd::Tensor<float>>* ref_latents_override = nullptr,
-                                     bool use_uncond_ip                                         = false) -> sd::Tensor<float> {
+                                     bool use_uncond_ip                                         = false,
+                                     int kv_prefix_slot                                         = -1) -> sd::Tensor<float> {
                 diffusion_params.context     = condition.c_crossattn.empty() ? nullptr : &condition.c_crossattn;
                 diffusion_params.c_concat    = c_concat_override != nullptr ? c_concat_override : (condition.c_concat.empty() ? nullptr : &condition.c_concat);
                 diffusion_params.y           = condition.c_vector.empty() ? nullptr : &condition.c_vector;
@@ -2820,6 +2837,15 @@ public:
                     diffusion_params.extra = std::monostate{};
                 }
 
+                if (sd_version_is_bagel(version)) {
+                    auto* bagel = dynamic_cast<Bagel::Runner*>(work_diffusion_model.get());
+                    if (!bagel) {
+                        LOG_ERROR("BAGEL diffusion runner is unavailable");
+                        return {};
+                    }
+                    bagel->set_active_slot(kv_prefix_slot);
+                }
+
                 sd::Tensor<float> cached_output;
                 if (step_cache.before_condition(&condition, noised_input, &cached_output)) {
                     return std::move(cached_output);
@@ -2852,12 +2878,13 @@ public:
                 }
             }
 
-            cond_out = run_condition(*positive_condition, c_concat_override);
+            cond_out = run_condition(*positive_condition, c_concat_override, nullptr, nullptr, false,
+                                     external_kv_conditions[0].active ? 0 : -1);
             if (cond_out.empty()) {
                 return {};
             }
 
-            if (!uncond.empty()) {
+            if (!uncond.empty() && (!sd_version_is_bagel(version) || sigma > 0.4f)) {
                 if (!step_cache.is_step_skipped()) {
                     compute_sample_controls(control_image,
                                             noised_input,
@@ -2874,17 +2901,19 @@ public:
                                            uncond.c_concat.empty() ? nullptr : &uncond.c_concat,
                                            uncond_skip_layers,
                                            nullptr,
-                                           true);
+                                           true,
+                                           external_kv_conditions[1].active ? 1 : -1);
                 if (uncond_out.empty()) {
                     return {};
                 }
             }
-            if (!img_uncond.empty()) {
+            if (!img_uncond.empty() && (!sd_version_is_bagel(version) || sigma > 0.4f)) {
                 img_uncond_out = run_condition(img_uncond,
                                                img_uncond.c_concat.empty() ? nullptr : &img_uncond.c_concat,
                                                nullptr,
                                                uncond_without_ref_latents ? &empty_ref_latents : nullptr,
-                                               true);
+                                               true,
+                                               external_kv_conditions[2].active ? 2 : -1);
                 if (img_uncond_out.empty()) {
                     return {};
                 }
@@ -2897,6 +2926,9 @@ public:
             guidance_input.pred_img_uncond = img_uncond_out.empty() ? nullptr : &img_uncond_out;
 
             sd::guidance::GuiderOutput guided = guidance_schedule.empty() ? primary_guidance.forward(guidance_input, {}) : primary_guidance.forward(guidance_input, {}, guidance_schedule[guidance_schedule.size() - 1 - step]);
+            if (sd_version_is_bagel(version)) {
+                guided.pred = Bagel::guide(sigma, cond_out, uncond_out, img_uncond_out, cfg_scale, img_cfg_scale);
+            }
             if (guided.pred.empty()) {
                 return {};
             }
@@ -2907,7 +2939,10 @@ public:
                     guidance_input.predict_skip_layer = [&]() -> sd::Tensor<float> {
                         return run_condition(cond,
                                              cond.c_concat.empty() ? nullptr : &cond.c_concat,
-                                             &skip_layer_guidance.layers());
+                                             &skip_layer_guidance.layers(),
+                                             nullptr,
+                                             false,
+                                             external_kv_conditions[0].active ? 0 : -1);
                     };
                 }
             }
@@ -3885,19 +3920,50 @@ struct sd_ctx_t {
 };
 
 bool sd_set_kv_prefix(sd_ctx_t* sd_ctx, bool unconditional, const sd_kv_prefix_t* prefix) {
+    return sd_set_kv_prefix_slot(sd_ctx, unconditional ? 1 : 0, prefix);
+}
+
+bool sd_set_kv_prefix_slot(sd_ctx_t* sd_ctx, int slot, const sd_kv_prefix_t* prefix) {
     if (sd_ctx == nullptr || sd_ctx->sd == nullptr || prefix == nullptr ||
-        prefix->token_ids == nullptr || prefix->token_count == 0 ||
+        slot < 0 || slot > 2 || (prefix->token_count && prefix->token_ids == nullptr) ||
         prefix->token_count > static_cast<size_t>(INT64_MAX)) {
         return false;
     }
     auto& sd = *sd_ctx->sd;
-    if (!sd.diffusion_model->set_kv_prefix(sd.n_threads, unconditional, *prefix)) {
+    if (!sd.diffusion_model->set_kv_prefix_slot(sd.n_threads, slot, *prefix)) {
         return false;
     }
-    auto& condition = sd.external_kv_conditions[unconditional ? 1 : 0];
-    condition.c_input_ids = sd::Tensor<int32_t>({static_cast<int64_t>(prefix->token_count)},
-                                              std::vector<int32_t>(prefix->token_ids, prefix->token_ids + prefix->token_count));
+    auto& external = sd.external_kv_conditions[slot];
+    external.value = {};
+    external.active = true;
+    if (prefix->token_count) {
+        external.value.c_input_ids = sd::Tensor<int32_t>({static_cast<int64_t>(prefix->token_count)},
+                                                          std::vector<int32_t>(prefix->token_ids, prefix->token_ids + prefix->token_count));
+    }
     return true;
+}
+
+bool sd_encode_image_prefix(sd_ctx_t* sd_ctx, int slot, const sd_image_t* image,
+                            int64_t seed, sd_kv_prefix_t* output) {
+    if (!sd_ctx || !sd_ctx->sd || !image || !output || !image->data || image->channel != 3 ||
+        !image->width || !image->height || slot < 0 || slot > 2) return false;
+    *output = {};
+    auto& sd = *sd_ctx->sd;
+    if (!sd.diffusion_model->supports_image_prefix(image->width, image->height) || !sd.first_stage_model) return false;
+    try {
+        sd.rng->manual_seed(seed);
+        auto latent = sd.encode_first_stage(sd_image_to_tensor(*image));
+        if (latent.empty() || !sd.diffusion_model->encode_image_prefix(sd.n_threads, slot, latent, *output)) return false;
+        auto& external = sd.external_kv_conditions[slot];
+        external.value = {};
+        external.active = true;
+        external.value.c_input_ids = sd::Tensor<int32_t>({int64_t(output->token_count)},
+            std::vector<int32_t>(output->token_ids, output->token_ids + output->token_count));
+        return true;
+    } catch (const std::exception& error) {
+        LOG_ERROR("Image prefix encoding failed: %s", error.what());
+        return false;
+    }
 }
 
 static bool sd_version_supports_video_generation(SDVersion version) {
@@ -4310,6 +4376,11 @@ struct GenerationRequest {
             guidance->img_cfg = 1.f;
         }
 
+        if (sd_version_is_bagel(sd_ctx->sd->version)) {
+            *use_uncond = guidance->txt_cfg > 1.f;
+            *use_img_uncond = *use_uncond && guidance->img_cfg > 1.f;
+            return;
+        }
         if (guidance->img_cfg != guidance->txt_cfg) {
             *use_uncond = true;
         }
@@ -5299,8 +5370,9 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
     sd_ctx->sd->compute_ip_adapter_tokens(sd_img_gen_params->ip_adapter_image, sd_img_gen_params->ip_adapter_strength);
     int64_t prepare_start_ms         = ggml_time_ms();
     condition_params.zero_out_masked = false;
-    auto cond = sd_ctx->sd->external_kv_conditions[0];
-    if (cond.empty()) {
+    const bool has_external_cond = sd_ctx->sd->external_kv_conditions[0].active;
+    auto cond = has_external_cond ? sd_ctx->sd->external_kv_conditions[0].value : SDCondition{};
+    if (!has_external_cond) {
         cond = sd_ctx->sd->cond_stage_model->get_learned_condition(sd_ctx->sd->n_threads, condition_params);
     }
     if (cond.c_concat.empty() && ref_image_params.pass_to_dit) {
@@ -5313,8 +5385,8 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
 
     SDCondition uncond;
     if (request->use_uncond || request->use_high_noise_uncond) {
-        if (!sd_ctx->sd->external_kv_conditions[1].empty()) {
-            uncond = sd_ctx->sd->external_kv_conditions[1];
+        if (sd_ctx->sd->external_kv_conditions[1].active) {
+            uncond = sd_ctx->sd->external_kv_conditions[1].value;
         } else if (sd_version_is_ideogram4(sd_ctx->sd->version)) {
             uncond.c_vector = sd::Tensor<float>::from_vector({1.0f});
         } else if (sd_version_is_minit2i(sd_ctx->sd->version)) {
@@ -5345,7 +5417,9 @@ static std::optional<ImageGenerationEmbeds> prepare_image_generation_embeds(sd_c
 
     SDCondition img_uncond;
     if (request->use_img_uncond) {
-        if ((request->use_uncond || request->use_high_noise_uncond) && (latents->ref_images.empty() || !use_ref_latent_img_cfg)) {
+        if (sd_ctx->sd->external_kv_conditions[2].active) {
+            img_uncond = sd_ctx->sd->external_kv_conditions[2].value;
+        } else if ((request->use_uncond || request->use_high_noise_uncond) && (latents->ref_images.empty() || !use_ref_latent_img_cfg)) {
             img_uncond = SDCondition(uncond.c_crossattn, uncond.c_vector, latents->img_uncond_concat_latent);
         } else {
             bool zero_out_masked = false;
