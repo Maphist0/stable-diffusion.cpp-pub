@@ -176,6 +176,11 @@ public:
 
     virtual bool supports_kv_prefix() const { return false; }
     virtual bool set_kv_prefix(int, bool, const sd_kv_prefix_t&) { return false; }
+    virtual bool set_kv_prefix_slot(int threads, int slot, const sd_kv_prefix_t& prefix) {
+        return slot >= 0 && slot < 2 && set_kv_prefix(threads, slot == 1, prefix);
+    }
+    virtual bool supports_image_prefix(int, int) const { return false; }
+    virtual bool encode_image_prefix(int, int, const sd::Tensor<float>&, sd_kv_prefix_t&) { return false; }
 
     virtual sd::Tensor<float> compute(int n_threads,
                                       const DiffusionParams& diffusion_params) = 0;

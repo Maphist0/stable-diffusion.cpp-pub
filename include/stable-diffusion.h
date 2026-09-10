@@ -489,7 +489,7 @@ SD_API char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params);
 SD_API sd_ctx_t* new_sd_ctx(const sd_ctx_params_t* sd_ctx_params);
 SD_API void free_sd_ctx(sd_ctx_t* sd_ctx);
 
-// A completed, unshifted sequence starting at position zero. K is post-RoPE;
+// A completed, unshifted sequence. K is post-RoPE;
 // V is unrotated. Each layer uses contiguous [head_dim, kv_heads, tokens, 1]
 // tensors in F16, BF16 or F32. Producer weights and positional semantics must
 // match the receiving model. The model validates its layer and head dimensions.
@@ -500,6 +500,7 @@ typedef struct {
     struct ggml_tensor* const* keys;
     struct ggml_tensor* const* values;
     size_t layer_count;
+    const int32_t* positions;  // Optional RoPE positions; NULL means 0..token_count-1.
 } sd_kv_prefix_t;
 
 // Requires external_kv_prefix. Copies one branch; the other branch is retained.
@@ -507,6 +508,15 @@ typedef struct {
 // Unsupported models and invalid prefixes return false. Guided generation needs
 // both conditional and unconditional branches before generate_image.
 SD_API bool sd_set_kv_prefix(sd_ctx_t* sd_ctx, bool unconditional, const sd_kv_prefix_t* prefix);
+
+// Slots: 0 conditional, 1 without text, 2 without image. Empty prefixes are model-dependent.
+SD_API bool sd_set_kv_prefix_slot(sd_ctx_t* sd_ctx, int slot, const sd_kv_prefix_t* prefix);
+
+// Append a preprocessed RGB image to an imported prefix through the model's VAE expert.
+// The returned prefix is borrowed until the next context operation. Copy it before
+// decoding or importing another prefix. Unsupported models return false.
+SD_API bool sd_encode_image_prefix(sd_ctx_t* sd_ctx, int slot, const sd_image_t* image,
+                                   int64_t seed, sd_kv_prefix_t* output);
 
 SD_API void free_sd_audio(sd_audio_t* audio);
 
