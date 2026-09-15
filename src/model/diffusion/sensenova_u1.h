@@ -772,6 +772,10 @@ namespace SenseNovaU1 {
                 image.shape()[1] % config.image_token_stride()) {
                 return {};
             }
+            auto understanding_vision = model.understanding_vision_embeddings();
+            if (!understanding_vision) {
+                return {};
+            }
             const int64_t grid_w = image.shape()[0] / config.patch_size;
             const int64_t grid_h = image.shape()[1] / config.patch_size;
             vision_position_h_vec.resize(grid_w * grid_h);
@@ -786,10 +790,10 @@ namespace SenseNovaU1 {
                 auto position_x = make_position_tensor(vision_position_w_vec, "snu15.understanding.position_x");
                 auto position_y = make_position_tensor(vision_position_h_vec, "snu15.understanding.position_y");
                 auto runner_ctx = get_context();
-                auto hidden = model.understanding_vision_embeddings()->forward(&runner_ctx,
-                                                                                image_input,
-                                                                                position_x,
-                                                                                position_y);
+                auto hidden = understanding_vision->forward(&runner_ctx,
+                                                             image_input,
+                                                             position_x,
+                                                             position_y);
                 ggml_build_forward_expand(graph, hidden);
                 return graph;
             };
