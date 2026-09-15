@@ -41,7 +41,7 @@ namespace SenseNovaU1 {
         float rope_theta_hw                  = 10000.f;
         float noise_scale_base_image_seq_len = 64.f;
         float noise_scale_max_value          = 16.f;
-        float t_eps                          = 0.02f;
+        float t_eps                          = 0.05f;
         bool add_noise_scale_embedding       = true;
 
         int64_t image_token_stride() const {
@@ -579,8 +579,10 @@ namespace SenseNovaU1 {
 
         explicit SenseNovaU1Model(const SenseNovaU1Config& config, bool generation_only = false)
             : config(config) {
-            blocks["language_model.model"]                       = std::make_shared<TextModel>(config, generation_only);
-            blocks["vision_model.embeddings"]                    = std::make_shared<VisionEmbeddings>(config);
+            blocks["language_model.model"] = std::make_shared<TextModel>(config, generation_only);
+            if (!generation_only) {
+                blocks["vision_model.embeddings"] = std::make_shared<VisionEmbeddings>(config);
+            }
             blocks["fm_modules.vision_model_mot_gen.embeddings"] = std::make_shared<VisionEmbeddings>(config);
             blocks["fm_modules.timestep_embedder"]               = std::make_shared<TimestepEmbedder>(config.hidden_size,
                                                                                                       config.timestep_embedding_size);
