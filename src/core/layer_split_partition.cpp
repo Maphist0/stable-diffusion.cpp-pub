@@ -142,55 +142,106 @@ namespace sd {
             return false;
         }
 
-        std::vector<int64_t> backend_capacities = graph_cut_layer_split_backend_capacities(split_backends,
-                                                                                           backend_vram_limits,
-                                                                                           primary_backend_vram_limit);
-
         std::vector<ggml_backend_t> backend_by_segment(plan.segments.size(), split_backends[0]);
-        size_t current_backend = 0;
-        int64_t current_used   = 0;
-        for (size_t seg_idx = 0; seg_idx < plan.segments.size(); seg_idx++) {
-            int64_t bytes = segment_param_bytes[seg_idx];
-            while (current_backend + 1 < split_backends.size() &&
-                   bytes > 0 &&
-                   current_used + bytes > backend_capacities[current_backend]) {
-                current_backend++;
-                current_used = 0;
-            }
-            if (bytes > 0 && current_used + bytes > backend_capacities[current_backend]) {
-                LOG_ERROR("%s graph-cut layer split: segment %zu needs %.1f MB on %s, but only %.1f MB is available under current VRAM limits",
-                          desc,
-                          seg_idx,
-                          (current_used + bytes) / (1024.0 * 1024.0),
-                          layer_split_backend_device_display_name(split_backends[current_backend]).c_str(),
-                          backend_capacities[current_backend] / (1024.0 * 1024.0));
-                return false;
-            }
-            current_used += bytes;
-            backend_by_segment[seg_idx] = split_backends[current_backend];
-
-            for (ggml_tensor* param : segment_params[seg_idx]) {
-                ggml_backend_t target_backend = split_backends[current_backend];
-                auto assigned_it              = param_assignments.find(param);
-                if (assigned_it == param_assignments.end()) {
-                    param_assignments[param]            = target_backend;
-                    assignment.has_new_param_assignment = true;
-                } else {
-                    target_backend = assigned_it->second;
+        bool all_params_assigned = true;
+        for (const auto& params : segment_params) {
+            for (ggml_tensor* param : params) {
+                if (param_assignments.find(param) == param_assignments.end()) {
+                    all_params_assigned = false;
+                    break;
                 }
+            }
+            if (!all_params_assigned) {
+                break;
+            }
+        }
 
-                auto backend_it = std::find(split_backends.begin(), split_backends.end(), target_backend);
-                if (backend_it == split_backends.end()) {
-                    LOG_ERROR("%s graph-cut layer split tensor '%s' is assigned to an unavailable backend",
+        if (all_params_assigned) {
+            // Parameter buffers have already been materialized by an earlier graph (for example,
+            // the first CFG pass).  Free VRAM therefore excludes these buffers.  Re-running the
+            // initial capacity check would count the same weights twice and can also remap graph
+            // nodes away from their immutable parameter buffers.
+            size_t previous_backend_idx = 0;
+            for (size_t seg_idx = 0; seg_idx < plan.segments.size(); seg_idx++) {
+                size_t segment_backend_idx = previous_backend_idx;
+                bool found_segment_backend = false;
+                for (ggml_tensor* param : segment_params[seg_idx]) {
+                    ggml_backend_t target_backend = param_assignments.at(param);
+                    auto backend_it = std::find(split_backends.begin(), split_backends.end(), target_backend);
+                    if (backend_it == split_backends.end()) {
+                        LOG_ERROR("%s graph-cut layer split tensor '%s' is assigned to an unavailable backend",
+                                  desc,
+                                  ggml_get_name(param));
+                        return false;
+                    }
+                    const size_t backend_idx = (size_t)std::distance(split_backends.begin(), backend_it);
+                    if (found_segment_backend && backend_idx != segment_backend_idx) {
+                        LOG_ERROR("%s graph-cut layer split segment %zu has parameters assigned to multiple backends",
+                                  desc,
+                                  seg_idx);
+                        return false;
+                    }
+                    segment_backend_idx = backend_idx;
+                    found_segment_backend = true;
+                    assignment.first_segment_by_backend[backend_idx] =
+                        std::min(assignment.first_segment_by_backend[backend_idx], seg_idx);
+                    assignment.last_segment_by_backend[backend_idx] =
+                        std::max(assignment.last_segment_by_backend[backend_idx], seg_idx + 1);
+                    assignment.tensors_by_backend[backend_idx].push_back(param);
+                    assignment.bytes_by_backend[backend_idx] += (int64_t)ggml_nbytes(param);
+                }
+                previous_backend_idx = segment_backend_idx;
+                backend_by_segment[seg_idx] = split_backends[segment_backend_idx];
+            }
+        } else {
+            std::vector<int64_t> backend_capacities = graph_cut_layer_split_backend_capacities(split_backends,
+                                                                                               backend_vram_limits,
+                                                                                               primary_backend_vram_limit);
+            size_t current_backend = 0;
+            int64_t current_used   = 0;
+            for (size_t seg_idx = 0; seg_idx < plan.segments.size(); seg_idx++) {
+                int64_t bytes = segment_param_bytes[seg_idx];
+                while (current_backend + 1 < split_backends.size() &&
+                       bytes > 0 &&
+                       current_used + bytes > backend_capacities[current_backend]) {
+                    current_backend++;
+                    current_used = 0;
+                }
+                if (bytes > 0 && current_used + bytes > backend_capacities[current_backend]) {
+                    LOG_ERROR("%s graph-cut layer split: segment %zu needs %.1f MB on %s, but only %.1f MB is available under current VRAM limits",
                               desc,
-                              ggml_get_name(param));
+                              seg_idx,
+                              (current_used + bytes) / (1024.0 * 1024.0),
+                              layer_split_backend_device_display_name(split_backends[current_backend]).c_str(),
+                              backend_capacities[current_backend] / (1024.0 * 1024.0));
                     return false;
                 }
-                size_t backend_idx                               = (size_t)std::distance(split_backends.begin(), backend_it);
-                assignment.first_segment_by_backend[backend_idx] = std::min(assignment.first_segment_by_backend[backend_idx], seg_idx);
-                assignment.last_segment_by_backend[backend_idx]  = std::max(assignment.last_segment_by_backend[backend_idx], seg_idx + 1);
-                assignment.tensors_by_backend[backend_idx].push_back(param);
-                assignment.bytes_by_backend[backend_idx] += (int64_t)ggml_nbytes(param);
+                current_used += bytes;
+                backend_by_segment[seg_idx] = split_backends[current_backend];
+
+                for (ggml_tensor* param : segment_params[seg_idx]) {
+                    ggml_backend_t target_backend = split_backends[current_backend];
+                    auto assigned_it              = param_assignments.find(param);
+                    if (assigned_it == param_assignments.end()) {
+                        param_assignments[param]            = target_backend;
+                        assignment.has_new_param_assignment = true;
+                    } else {
+                        target_backend = assigned_it->second;
+                    }
+
+                    auto backend_it = std::find(split_backends.begin(), split_backends.end(), target_backend);
+                    if (backend_it == split_backends.end()) {
+                        LOG_ERROR("%s graph-cut layer split tensor '%s' is assigned to an unavailable backend",
+                                  desc,
+                                  ggml_get_name(param));
+                        return false;
+                    }
+                    size_t backend_idx                               = (size_t)std::distance(split_backends.begin(), backend_it);
+                    assignment.first_segment_by_backend[backend_idx] = std::min(assignment.first_segment_by_backend[backend_idx], seg_idx);
+                    assignment.last_segment_by_backend[backend_idx]  = std::max(assignment.last_segment_by_backend[backend_idx], seg_idx + 1);
+                    assignment.tensors_by_backend[backend_idx].push_back(param);
+                    assignment.bytes_by_backend[backend_idx] += (int64_t)ggml_nbytes(param);
+                }
             }
         }
 
