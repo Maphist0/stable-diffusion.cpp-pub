@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "core/ggml_extend.hpp"
-#include "core/ggml_graph_cut.h"
 #include "model/diffusion/dit.hpp"
 #include "model/diffusion/model.hpp"
 #include "model/te/llm.hpp"
@@ -555,7 +554,6 @@ namespace SenseNovaU1 {
                              ggml_tensor* attention_mask,
                              Branch branch,
                              const std::string& cache_prefix) {
-            sd::ggml_graph_cut::mark_graph_cut(x, "sensenova_u1.text.prelude", "x");
             for (int i = 0; i < config.num_layers; ++i) {
                 auto layer = std::dynamic_pointer_cast<TransformerBlock>(blocks["layers." + std::to_string(i)]);
                 x          = layer->forward(ctx,
@@ -566,7 +564,6 @@ namespace SenseNovaU1 {
                                             attention_mask,
                                             branch,
                                             cache_prefix);
-                sd::ggml_graph_cut::mark_graph_cut(x, "sensenova_u1.text.layers." + std::to_string(i), "x");
             }
             auto norm = std::dynamic_pointer_cast<LLM::LLMRMSNorm>(
                 blocks[branch == Branch::GENERATION ? "norm_mot_gen" : "norm"]);
