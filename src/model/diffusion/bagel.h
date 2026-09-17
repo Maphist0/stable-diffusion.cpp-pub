@@ -5,7 +5,6 @@
 #include "model/diffusion/model.hpp"
 #include "runtime/denoiser.hpp"
 #include "conditioning/conditioner.hpp"
-#include "core/ggml_graph_cut.h"
 
 #include <array>
 #include <cstring>
@@ -264,7 +263,6 @@ struct Model : public GGMLBlock {
         image = ggml_add(ctx, image, time);
         image = ggml_add(ctx, image, ggml_get_rows(ctx, generated("latent_pos_embed.pos_embed"), spatial_ids));
         auto x = ggml_concat(ctx, boundary_embeddings, image, 1);
-        sd::ggml_graph_cut::mark_graph_cut(x, "bagel.prelude", "x");
         for (int layer = 0; layer < layers; ++layer) {
             const auto text = "blk." + std::to_string(layer) + ".";
             const auto gen = "language_model.model.layers." + std::to_string(layer) + ".";
@@ -272,7 +270,6 @@ struct Model : public GGMLBlock {
             x = ggml_add(ctx, x, attention(run, normalized, rope_ids, layer, prefix_keys[layer], prefix_values[layer], export_prefix));
             normalized = mixed_norm(ctx, x, 1, text + "ffn_norm.weight", gen + "post_attention_layernorm_moe_gen.weight");
             x = ggml_add(ctx, x, feed_forward(ctx, normalized, layer));
-            sd::ggml_graph_cut::mark_graph_cut(x, "bagel.layers." + std::to_string(layer), "x");
         }
         if (!export_prefix.empty()) return x;
         x = norm(ctx, slice(ctx, x, 1, 2, x->ne[1]), generated("language_model.model.norm_moe_gen.weight"));
