@@ -1010,7 +1010,12 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_linear(ggml_context* ctx,
                                                ggml_tensor* w,
                                                ggml_tensor* b,
                                                bool force_prec_f32 = false,
-                                               float scale         = 1.f) {
+                                               float scale         = 1.f,
+                                               ggml_type output_type = GGML_TYPE_F32) {
+    GGML_ASSERT(output_type == GGML_TYPE_F32 || output_type == GGML_TYPE_F16);
+    if (output_type == GGML_TYPE_F16 && x->type != GGML_TYPE_F16) {
+        x = ggml_cast(ctx, x, GGML_TYPE_F16);
+    }
     if (scale != 1.f) {
         x = ggml_ext_scale(ctx, x, scale);
     }
@@ -1019,13 +1024,13 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_linear(ggml_context* ctx,
         int64_t ne2 = x->ne[2];
         int64_t ne3 = x->ne[3];
         x           = ggml_reshape_2d(ctx, x, x->ne[0], x->ne[1] * x->ne[2] * x->ne[3]);
-        x           = ggml_mul_mat(ctx, w, x);
+        x           = ggml_mul_mat_out_type(ctx, w, x, output_type);
         if (force_prec_f32) {
             ggml_mul_mat_set_prec(x, GGML_PREC_F32);
         }
         x = ggml_reshape_4d(ctx, x, x->ne[0], x->ne[1] / ne2 / ne3, ne2, ne3);
     } else {
-        x = ggml_mul_mat(ctx, w, x);
+        x = ggml_mul_mat_out_type(ctx, w, x, output_type);
         if (force_prec_f32) {
             ggml_mul_mat_set_prec(x, GGML_PREC_F32);
         }
@@ -1034,6 +1039,9 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_linear(ggml_context* ctx,
         x = ggml_ext_scale(ctx, x, 1.f / scale);
     }
     if (b != nullptr) {
+        if (b->type != output_type) {
+            b = ggml_cast(ctx, b, output_type);
+        }
         x = ggml_add_inplace(ctx, x, b);
     }
     return x;
@@ -1144,7 +1152,12 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_2d(ggml_context* ctx,
                                                 bool direct     = false,
                                                 bool circular_x = false,
                                                 bool circular_y = false,
-                                                float scale     = 1.f) {
+                                                float scale     = 1.f,
+                                                ggml_type output_type = GGML_TYPE_F32) {
+    GGML_ASSERT(output_type == GGML_TYPE_F32 || output_type == GGML_TYPE_F16);
+    if (output_type == GGML_TYPE_F16 && x->type != GGML_TYPE_F16) {
+        x = ggml_cast(ctx, x, GGML_TYPE_F16);
+    }
     if (scale != 1.f) {
         x = ggml_ext_scale(ctx, x, scale);
     }
@@ -1160,13 +1173,19 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_2d(ggml_context* ctx,
 
     if (direct) {
         x = ggml_conv_2d_direct(ctx, w, x, s0, s1, p0, p1, d0, d1);
+        if (x->type != output_type) {
+            x = ggml_cast(ctx, x, output_type);
+        }
     } else {
-        x = ggml_conv_2d(ctx, w, x, s0, s1, p0, p1, d0, d1);
+        x = ggml_conv_2d_out_type(ctx, w, x, s0, s1, p0, p1, d0, d1, output_type);
     }
     if (scale != 1.f) {
         x = ggml_ext_scale(ctx, x, 1.f / scale);
     }
     if (b != nullptr) {
+        if (b->type != output_type) {
+            b = ggml_cast(ctx, b, output_type);
+        }
         b = ggml_reshape_4d(ctx, b, 1, 1, b->ne[0], 1);
         x = ggml_add_inplace(ctx, x, b);
     }
@@ -1358,7 +1377,9 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
                                                       ggml_tensor* mask = nullptr,
                                                       bool skip_reshape = false,
                                                       bool flash_attn   = false,
-                                                      float kv_scale    = 1.0f) {  // avoid overflow
+                                                      float kv_scale    = 1.0f,
+                                                      ggml_type output_type = GGML_TYPE_F32) {  // avoid overflow
+    GGML_ASSERT(output_type == GGML_TYPE_F32 || output_type == GGML_TYPE_F16);
     int64_t L_q;
     int64_t L_k;
     int64_t C;
@@ -1432,6 +1453,9 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
         if (kv_scale != 1.0f) {
             out = ggml_ext_scale(ctx, out, 1.0f / kv_scale);
         }
+        if (out->type != output_type) {
+            out = ggml_cast(ctx, out, output_type);
+        }
         return out;
     };
 
@@ -1475,7 +1499,13 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
         }
         kq = ggml_soft_max_inplace(ctx, kq);
 
-        kqv = ggml_mul_mat(ctx, v, kq);  // [N * n_head, L_q, d_head]
+        if (output_type == GGML_TYPE_F16) {
+            v   = ggml_cast(ctx, v, GGML_TYPE_F16);
+            kq  = ggml_cast(ctx, kq, GGML_TYPE_F16);
+            kqv = ggml_mul_mat_out_type(ctx, v, kq, GGML_TYPE_F16);  // [N * n_head, L_q, d_head]
+        } else {
+            kqv = ggml_mul_mat(ctx, v, kq);  // [N * n_head, L_q, d_head]
+        }
 
         kqv = ggml_reshape_4d(ctx, kqv, d_head, L_q, n_head, N);  // [N, n_head, L_q, d_head]
         kqv = ggml_permute(ctx, kqv, 0, 2, 1, 3);                 // [N, L_q, n_head, d_head]
@@ -3414,6 +3444,7 @@ protected:
     bool int8_convrot           = false;
     int int8_convrot_group_size = 0;
     float scale;
+    ggml_type output_type;
     std::string prefix;
 
     void init_params(ggml_context* ctx, const String2TensorStorage& tensor_storage_map = {}, const std::string prefix = "") override {
@@ -3427,7 +3458,7 @@ protected:
         }
         params["weight"] = ggml_new_tensor_2d(ctx, wtype, in_features, out_features);
         if (bias) {
-            enum ggml_type wtype = GGML_TYPE_F32;
+            enum ggml_type wtype = output_type;
             params["bias"]       = ggml_new_tensor_1d(ctx, wtype, out_features);
         }
         auto weight_storage           = tensor_storage_map.find(prefix + "weight");
@@ -3453,13 +3484,22 @@ public:
            bool bias           = true,
            bool force_f32      = false,
            bool force_prec_f32 = false,
-           float scale         = 1.f)
+           float scale         = 1.f,
+           ggml_type output_type = GGML_TYPE_F32)
         : in_features(in_features),
           out_features(out_features),
           bias(bias),
           force_f32(force_f32),
           force_prec_f32(force_prec_f32),
-          scale(scale) {}
+          scale(scale),
+          output_type(output_type) {
+        GGML_ASSERT(output_type == GGML_TYPE_F32 || output_type == GGML_TYPE_F16);
+    }
+
+    void set_output_type(ggml_type output_type_) {
+        GGML_ASSERT(output_type_ == GGML_TYPE_F32 || output_type_ == GGML_TYPE_F16);
+        output_type = output_type_;
+    }
 
     void set_scale(float scale_) {
         scale = scale_;
@@ -3541,7 +3581,7 @@ public:
 #endif
         }
         if (has_weight_scale) {
-            out = ggml_ext_linear(ctx->ggml_ctx, x, w, nullptr, force_prec_f32, scale);
+            out = ggml_ext_linear(ctx->ggml_ctx, x, w, nullptr, force_prec_f32, scale, output_type);
             out = ggml_mul(ctx->ggml_ctx, out, weight_scale);
             if (ctx->weight_adapter) {
                 WeightAdapter::ForwardParams forward_params;
@@ -3571,7 +3611,7 @@ public:
             forward_params.linear.scale          = scale;
             out                                  = ctx->weight_adapter->forward_with_lora(ctx->ggml_ctx, ctx->backend, x, w, linear_bias, prefix, forward_params);
         } else {
-            out = ggml_ext_linear(ctx->ggml_ctx, x, w, linear_bias, force_prec_f32, scale);
+            out = ggml_ext_linear(ctx->ggml_ctx, x, w, linear_bias, force_prec_f32, scale, output_type);
         }
         return out;
     }
@@ -3636,6 +3676,7 @@ protected:
     std::pair<int, int> dilation;
     bool bias;
     float scale = 1.f;
+    ggml_type output_type;
     std::string prefix;
 
     void init_params(ggml_context* ctx, const String2TensorStorage& tensor_storage_map, const std::string prefix = "") override {
@@ -3643,7 +3684,7 @@ protected:
         enum ggml_type wtype = GGML_TYPE_F16;
         params["weight"]     = ggml_new_tensor_4d(ctx, wtype, kernel_size.second, kernel_size.first, in_channels, out_channels);
         if (bias) {
-            enum ggml_type wtype = GGML_TYPE_F32;
+            enum ggml_type wtype = output_type;
             params["bias"]       = ggml_new_tensor_1d(ctx, wtype, out_channels);
         }
     }
@@ -3655,14 +3696,23 @@ public:
            std::pair<int, int> stride   = {1, 1},
            std::pair<int, int> padding  = {0, 0},
            std::pair<int, int> dilation = {1, 1},
-           bool bias                    = true)
+           bool bias                    = true,
+           ggml_type output_type        = GGML_TYPE_F32)
         : in_channels(in_channels),
           out_channels(out_channels),
           kernel_size(kernel_size),
           stride(stride),
           padding(padding),
           dilation(dilation),
-          bias(bias) {}
+          bias(bias),
+          output_type(output_type) {
+        GGML_ASSERT(output_type == GGML_TYPE_F32 || output_type == GGML_TYPE_F16);
+    }
+
+    void set_output_type(ggml_type output_type_) {
+        GGML_ASSERT(output_type_ == GGML_TYPE_F32 || output_type_ == GGML_TYPE_F16);
+        output_type = output_type_;
+    }
 
     void set_scale(float scale_value) {
         scale = scale_value;
@@ -3706,7 +3756,8 @@ public:
                                 ctx->conv2d_direct_enabled,
                                 ctx->circular_x_enabled,
                                 ctx->circular_y_enabled,
-                                scale);
+                                scale,
+                                output_type);
     }
 };
 
